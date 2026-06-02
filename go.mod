@@ -1,4 +1,4 @@
-module github.com/gcannon/mnil
+module github.com/GarrettCannon/mnil
 
 go 1.26.3
 

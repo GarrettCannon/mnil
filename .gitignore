@@ -1,0 +1,16 @@
+# Compiled binary
+/mnil
+
+# Saved log files written by `s` keypress
+mnil-*.log
+
+# Go
+*.test
+*.out
+/dist/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
