@@ -13,6 +13,8 @@ find / 2>&1   | mnil
 tail -F /var/log/system.log | mnil
 ```
 
+![mnil demo](docs/demo.gif)
+
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea),
 [Bubbles](https://github.com/charmbracelet/bubbles), and
 [Lip Gloss](https://github.com/charmbracelet/lipgloss).
@@ -22,7 +24,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea),
 ### Homebrew
 
 ```sh
-brew tap GarrettCannon/mnil
+brew tap garrettcannon/mnil
 brew install mnil
 ```
 
@@ -31,7 +33,7 @@ brew install mnil
 Requires Go 1.21 or newer.
 
 ```sh
-go install github.com/GarrettCannon/mnil@latest
+go install github.com/garrettcannon/mnil@latest
 ```
 
 ## Usage
@@ -79,45 +81,12 @@ Mouse wheel scrolls the viewport (and disables follow).
 - **Save** — `s` writes the current buffer (ANSI-stripped) to a timestamped
   file in the working directory.
 
-## Try it
-
-A quick fish-shell loop that produces varied log-like output for testing:
-
-```fish
-while true
-    set ts (date +%H:%M:%S)
-    set lvl (random choice INFO WARN ERROR DEBUG)
-    set msg (random choice \
-        "request handled in 42ms" \
-        "cache miss for key=user:1234" \
-        "ERROR: connection refused to db:5432" \
-        "GET /api/users 200" \
-        "compiled 1245 modules" \
-        "hot reload completed")
-    echo "$ts [$lvl] $msg"
-    sleep 0.1
-end | mnil
-```
-
 For tools that disable color when stdout isn't a TTY:
 
 ```sh
 FORCE_COLOR=1 npx next dev | mnil          # most JS tooling
 CLICOLOR_FORCE=1 ls -laG    | mnil          # BSD ls (macOS)
 ls --color=always           | mnil          # GNU ls
-```
-
-## Development
-
-```sh
-go build -o mnil .
-./mnil --version
-```
-
-To build with an injected version string (the Homebrew formula does this):
-
-```sh
-go build -ldflags "-X main.version=v0.1.0" -o mnil .
 ```
 
 ## License
