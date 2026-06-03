@@ -24,7 +24,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea),
 ### Homebrew
 
 ```sh
-brew tap garrettcannon/mnil
+brew tap garrettcannon/tap
 brew install mnil
 ```
 
