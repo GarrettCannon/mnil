@@ -1,17 +1,23 @@
 # mnil
 
-**M**y **N**ame **I**s **L**og — a small TUI log viewer that tails piped stdin.
+**M**y **N**ame **I**s **L**og — a small TUI log viewer for piped or spawned
+processes.
 
-Pipe anything into it. Search live as you type, jump between matches, toggle
-follow, wrap long lines, save the buffer to a file. ANSI colors from the
-producing tool pass through; plain text gets common log tokens
-(`ERROR`/`WARN`/`INFO`/URLs/IPs) auto-colored.
+Pipe a command in, or hand mnil the command to run. Search live as you type,
+jump between matches, toggle follow, wrap long lines, save the buffer to a
+file. ANSI colors from the producing tool pass through; plain text gets common
+log tokens (`ERROR`/`WARN`/`INFO`/URLs/IPs) auto-colored.
 
 ```
-ping 8.8.8.8 | mnil
+mnil "npm run dev"             # spawn — captures stdout + stderr together
+mnil "ping 8.8.8.8"
+ping 8.8.8.8 | mnil             # pipe — stdout only
 find / 2>&1   | mnil
 tail -F /var/log/system.log | mnil
 ```
+
+Use the `mnil "<cmd>"` form when you want stderr captured alongside stdout
+without the `2>&1` dance — mnil owns both ends.
 
 ![mnil demo](docs/demo.gif)
 
@@ -39,11 +45,12 @@ go install github.com/garrettcannon/mnil@latest
 ## Usage
 
 ```
-<command> | mnil
+mnil <command>       # spawn — captures stdout + stderr
+<command> | mnil     # pipe — captures stdout only
 ```
 
-mnil reads lines from stdin and renders them in a scrollable viewport that
-follows the tail by default. Keystrokes:
+mnil renders incoming lines in a scrollable viewport that follows the tail by
+default. Keystrokes:
 
 | Key            | Action                                       |
 | -------------- | -------------------------------------------- |
@@ -80,14 +87,22 @@ Mouse wheel scrolls the viewport (and disables follow).
   rebuilt on wrap toggle or width change.
 - **Save** — `s` writes the current buffer (ANSI-stripped) to a timestamped
   file in the working directory.
+- **stderr capture** — in `mnil "<cmd>"` mode the child's stdout and stderr
+  share the same pipe, so error output lands in the buffer without `2>&1`.
+- **Color hinting** — in `mnil "<cmd>"` mode mnil sets `FORCE_COLOR=1`,
+  `CLICOLOR_FORCE=1`, and `PYTHONUNBUFFERED=1` in the child's environment so
+  most tools voluntarily keep color and flush per line.
 
-For tools that disable color when stdout isn't a TTY:
+In pipe mode, you may still need to coax color out of tools that detect
+non-TTY stdout:
 
 ```sh
 FORCE_COLOR=1 npx next dev | mnil          # most JS tooling
 CLICOLOR_FORCE=1 ls -laG    | mnil          # BSD ls (macOS)
 ls --color=always           | mnil          # GNU ls
 ```
+
+`mnil "npx next dev"` handles all of these automatically.
 
 ## License
 

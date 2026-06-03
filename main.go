@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -27,6 +29,7 @@ type logLine struct {
 type logLineMsg string
 type logEOFMsg struct{}
 type tickMsg time.Time
+type cmdExitedMsg struct{ err error }
 
 const renderInterval = 33 * time.Millisecond // ~30Hz
 
@@ -110,6 +113,7 @@ type model struct {
 	rowOffsets   []int // viewport row index of each logical line's first wrapped row
 	ready        bool
 	dirty        bool // ingest accumulated, waiting for next tick to render
+	cmd          string // command string when mnil is running a child process
 	width        int
 	height       int
 }
@@ -170,9 +174,12 @@ var (
 
 // Background-only SGR codes. Using only bg/bg-reset means foreground colors
 // emitted by the source process survive across the highlighted span.
+// Bg colors picked from ANSI indices that aren't used as a foreground by any
+// termRule — keeps highlights distinct even when the matched text is already
+// colored (e.g. searching POST, which decorate() renders as magenta fg).
 const (
-	matchBG   = "\x1b[43m" // yellow bg (ANSI 3)
-	currentBG = "\x1b[45m" // magenta bg (ANSI 5)
+	matchBG   = "\x1b[44m" // blue bg (ANSI 4)
+	currentBG = "\x1b[42m" // green bg (ANSI 2)
 	bgReset   = "\x1b[49m"
 )
 
@@ -216,7 +223,7 @@ func decorate(raw string) string {
 	return out
 }
 
-func initialModel() model {
+func initialModel(cmd string) model {
 	ti := textinput.New()
 	ti.Placeholder = "search..."
 	ti.Prompt = "  "
@@ -241,6 +248,7 @@ func initialModel() model {
 		keys:   newKeyMap(),
 		follow: true,
 		mode:   modeNormal,
+		cmd:    cmd,
 	}
 }
 
@@ -252,14 +260,14 @@ func (m model) activeKeyMap() help.KeyMap {
 	return normalKeys(m.keys)
 }
 
-// readStdin streams lines from stdin into the bubbletea program.
-func readStdin(p *tea.Program) {
-	scanner := bufio.NewScanner(os.Stdin)
+// readLines streams lines from r into the bubbletea program. Returns when r
+// hits EOF.
+func readLines(p *tea.Program, r io.Reader) {
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		p.Send(logLineMsg(scanner.Text()))
 	}
-	p.Send(logEOFMsg{})
 }
 
 func (m model) Init() tea.Cmd {
@@ -689,6 +697,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logEOFMsg:
 		// stdin closed; nothing special for now
 
+	case cmdExitedMsg:
+		note := "[mnil] process exited"
+		if msg.err != nil {
+			note = fmt.Sprintf("[mnil] process exited: %v", msg.err)
+		}
+		m.appendNotice(note)
+
 	case tea.KeyMsg:
 		if m.mode == modeSearch {
 			switch {
@@ -875,8 +890,29 @@ func (m model) View() string {
 	return title + "\n" + viewportView + "\n" + bottom
 }
 
+func truncate(s string, max int) string {
+	if max <= 1 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
+}
+
 func (m model) titleBar() string {
-	left := brandChip.Render("mnil") + infoChip.Render(fmt.Sprintf("%d lines", len(m.lines)))
+	left := brandChip.Render("mnil")
+	if m.cmd != "" {
+		maxCmd := m.width / 3
+		if maxCmd > 60 {
+			maxCmd = 60
+		}
+		if maxCmd < 12 {
+			maxCmd = 12
+		}
+		left += infoChip.Render(truncate(m.cmd, maxCmd))
+	}
+	left += infoChip.Render(fmt.Sprintf("%d lines", len(m.lines)))
 	if m.query != "" {
 		if len(m.matches) == 0 {
 			left += matchChip.Render(fmt.Sprintf("/%s · no matches", m.query))
@@ -906,14 +942,21 @@ func (m model) titleBar() string {
 var version = "dev"
 
 func usage() {
-	fmt.Fprint(os.Stderr, `mnil — a TUI log viewer that follows piped stdin.
+	fmt.Fprint(os.Stderr, `mnil — a TUI log viewer.
 
 Usage:
-  <command> | mnil
+  mnil <command>       run command and tail its output (stdout + stderr)
+  <command> | mnil     read piped output (stdout only)
 
 Flags:
   -version    print version and exit
   -h, -help   print this help
+
+Examples:
+  mnil "npm run dev"
+  mnil "ping 8.8.8.8"
+  find / 2>&1 | mnil
+  tail -F /var/log/system.log | mnil
 
 Keys (in-app):
   /            open search (live: matches highlight as you type)
@@ -925,11 +968,6 @@ Keys (in-app):
   s            save buffer to a timestamped .log file in CWD
   ?            toggle full keybinding help
   q, ctrl+c    quit
-
-Examples:
-  ping 8.8.8.8 | mnil
-  find / 2>&1 | mnil
-  tail -F /var/log/system.log | mnil
 `)
 }
 
@@ -942,37 +980,85 @@ func main() {
 		fmt.Println("mnil", version)
 		return
 	}
-	if flag.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "mnil: unexpected arguments: %v\n\n", flag.Args())
-		usage()
-		os.Exit(2)
-	}
 
-	// Bubbletea reads input from the terminal. When stdin is a pipe (e.g.
-	// `npx next dev | mnil`), we route keyboard input from /dev/tty instead
-	// so the pipe can deliver log lines.
+	// Determine input source: spawned command or piped stdin.
 	stdinPiped := false
 	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
 		stdinPiped = true
 	}
-	if !stdinPiped {
-		fmt.Fprint(os.Stderr, "mnil: no input on stdin. Pipe something in, e.g.\n  ping 8.8.8.8 | mnil\nRun `mnil -h` for help.\n")
+	if flag.NArg() == 0 && !stdinPiped {
+		fmt.Fprint(os.Stderr, "mnil: no input. Run a command or pipe something in:\n  mnil \"npm run dev\"\n  ping 8.8.8.8 | mnil\nRun `mnil -h` for help.\n")
 		os.Exit(2)
 	}
 
-	var opts []tea.ProgramOption
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mnil: cannot open /dev/tty:", err)
 		os.Exit(1)
 	}
-	opts = append(opts, tea.WithInput(tty), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	opts := []tea.ProgramOption{
+		tea.WithInput(tty),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+	}
 
-	p := tea.NewProgram(initialModel(), opts...)
-	go readStdin(p)
+	var (
+		child      *exec.Cmd
+		childRead  io.Reader
+		cmdString  string
+	)
 
+	if flag.NArg() > 0 {
+		cmdString = strings.Join(flag.Args(), " ")
+		c := exec.Command("sh", "-c", cmdString)
+		// Hint colorized output even though stdout isn't a TTY. Most tools
+		// honor these; the ones that don't fall back gracefully to plain text.
+		c.Env = append(os.Environ(),
+			"FORCE_COLOR=1",
+			"CLICOLOR_FORCE=1",
+			"PYTHONUNBUFFERED=1",
+		)
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "mnil: pipe:", err)
+			os.Exit(1)
+		}
+		c.Stdout = pw
+		c.Stderr = pw
+		if err := c.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "mnil: failed to start command:", err)
+			os.Exit(1)
+		}
+		// Parent closes write end so EOF propagates to the reader after the
+		// child exits.
+		pw.Close()
+		child = c
+		childRead = pr
+	}
+
+	p := tea.NewProgram(initialModel(cmdString), opts...)
+
+	switch {
+	case child != nil:
+		go func() {
+			readLines(p, childRead)
+			err := child.Wait()
+			p.Send(cmdExitedMsg{err: err})
+		}()
+	case stdinPiped:
+		go func() {
+			readLines(p, os.Stdin)
+			p.Send(logEOFMsg{})
+		}()
+	}
+
+	exitCode := 0
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "mnil error:", err)
-		os.Exit(1)
+		exitCode = 1
 	}
+	if child != nil && child.Process != nil {
+		_ = child.Process.Kill()
+	}
+	os.Exit(exitCode)
 }

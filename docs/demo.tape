@@ -14,7 +14,7 @@ Set TypingSpeed 90ms
 Set Framerate 24
 Set Padding 20
 
-Type "bash docs/demo-source.sh | ./mnil"
+Type "./mnil 'bash docs/demo-source.sh'"
 Enter
 Sleep 4s
 
