@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -1025,6 +1027,9 @@ func main() {
 		}
 		c.Stdout = pw
 		c.Stderr = pw
+		// Put the child in its own pgrp so we can SIGTERM the whole tree
+		// (npm → node → next workers) on quit, not just `sh -c`.
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if err := c.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "mnil: failed to start command:", err)
 			os.Exit(1)
@@ -1058,7 +1063,15 @@ func main() {
 		exitCode = 1
 	}
 	if child != nil && child.Process != nil {
-		_ = child.Process.Kill()
+		// Negative pid signals the whole pgrp we created with Setpgid above.
+		_ = syscall.Kill(-child.Process.Pid, syscall.SIGTERM)
+	}
+	if stdinPiped {
+		// Upstream pipeline members share our pgrp (shell pipeline semantics).
+		// Ignoring SIGTERM here means kill(0, …) reaches them without taking
+		// us down before we hit os.Exit with our chosen code.
+		signal.Ignore(syscall.SIGTERM)
+		_ = syscall.Kill(0, syscall.SIGTERM)
 	}
 	os.Exit(exitCode)
 }
