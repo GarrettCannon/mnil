@@ -1,0 +1,72 @@
+# Goreleaser config — see https://goreleaser.com
+# Test locally:   goreleaser release --snapshot --clean
+# Real release:   git tag vX.Y.Z && git push --tags  (GitHub Actions runs the rest)
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: mnil
+    main: .
+    binary: mnil
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: mnil
+    formats: [tar.gz]
+    name_template: 'mnil_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^chore:'
+      - '^test:'
+
+homebrew_casks:
+  - name: mnil
+    repository:
+      owner: garrettcannon
+      name: homebrew-tap
+      branch: main
+      token: '{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}'
+    homepage: 'https://github.com/garrettcannon/mnil'
+    description: 'TUI log viewer that tails piped or spawned commands'
+    license: 'MIT'
+    # The release tarballs live on releases.githubusercontent.com; this
+    # tells `brew audit` they're trusted because they originate from
+    # github.com/garrettcannon/mnil.
+    url:
+      verified: github.com/garrettcannon/mnil
+    commit_author:
+      name: garrettcannon
+      email: me@garrettcannon.dev
+    # The binary isn't code-signed, so macOS Gatekeeper quarantines it on
+    # download. Strip the quarantine attr post-install so it runs without
+    # a "cannot be opened because the developer cannot be verified" prompt.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/mnil"]
+          end
