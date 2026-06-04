@@ -33,6 +33,13 @@ type logEOFMsg struct{}
 type tickMsg time.Time
 type cmdExitedMsg struct{ err error }
 
+// stdinDone is set when the piped stdin reader hits EOF. Read after the TUI
+// exits to decide whether the upstream producer is still alive: if EOF fired,
+// it's already gone (cat/ls/etc) and no kill is needed; if not, it's still
+// running (ping/tail -F/etc) and we pgrp-kill it on shutdown. Written from
+// the reader goroutine, read after p.Run() returns — no race.
+var stdinDone bool
+
 const renderInterval = 33 * time.Millisecond // ~30Hz
 
 type mode int
@@ -1001,7 +1008,9 @@ func main() {
 	opts := []tea.ProgramOption{
 		tea.WithInput(tty),
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
+		// No mouse capture: lets the terminal handle native click-drag
+		// selection of log text. Scroll/nav uses the keyboard (arrows,
+		// pgup/pgdn, g/G).
 	}
 
 	var (
@@ -1053,6 +1062,7 @@ func main() {
 	case stdinPiped:
 		go func() {
 			readLines(p, os.Stdin)
+			stdinDone = true
 			p.Send(logEOFMsg{})
 		}()
 	}
@@ -1066,10 +1076,11 @@ func main() {
 		// Negative pid signals the whole pgrp we created with Setpgid above.
 		_ = syscall.Kill(-child.Process.Pid, syscall.SIGTERM)
 	}
-	if stdinPiped {
-		// Upstream pipeline members share our pgrp (shell pipeline semantics).
-		// Ignoring SIGTERM here means kill(0, …) reaches them without taking
-		// us down before we hit os.Exit with our chosen code.
+	// Piped stdin: only pgrp-kill if the upstream is still alive. If the
+	// reader saw EOF, the producer has already exited (cat/ls/find) and a
+	// pgrp blast risks taking down the parent shell in setups where it
+	// shares our pgrp — closing the user's terminal.
+	if stdinPiped && !stdinDone {
 		signal.Ignore(syscall.SIGTERM)
 		_ = syscall.Kill(0, syscall.SIGTERM)
 	}
