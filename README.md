@@ -59,7 +59,8 @@ default. Keystrokes:
 | `shift+tab`    | jump to previous match                       |
 | `esc`          | clear search                                 |
 | `enter`        | close the search box (matches stay applied)  |
-| `f`            | toggle follow (auto-scroll to newest line)   |
+| `f`            | toggle filter (show only matching lines)     |
+| `F`            | toggle follow (auto-scroll to newest line)   |
 | `g` / `G`      | jump to top / bottom                         |
 | `w`            | toggle line wrap                             |
 | `s`            | save buffer to `mnil-<timestamp>.log` in CWD |

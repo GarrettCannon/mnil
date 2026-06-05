@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -57,6 +57,7 @@ type keyMap struct {
 	Top    key.Binding
 	Bottom key.Binding
 	Wrap   key.Binding
+	Filter key.Binding
 	Save   key.Binding
 	Clear  key.Binding
 	Close  key.Binding
@@ -69,10 +70,11 @@ func newKeyMap() keyMap {
 		Search: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 		Next:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next match")),
 		Prev:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧tab", "prev match")),
-		Follow: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "follow")),
+		Follow: key.NewBinding(key.WithKeys("F"), key.WithHelp("F", "follow")),
 		Top:    key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "top")),
 		Bottom: key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "bottom")),
 		Wrap:   key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "wrap")),
+		Filter: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "filter")),
 		Save:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "save")),
 		Clear:  key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "clear")),
 		Close:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("↵", "close search")),
@@ -85,12 +87,12 @@ func newKeyMap() keyMap {
 type normalKeys keyMap
 
 func (k normalKeys) ShortHelp() []key.Binding {
-	return []key.Binding{k.Search, k.Next, k.Follow, k.Wrap, k.Save, k.Help, k.Quit}
+	return []key.Binding{k.Search, k.Next, k.Filter, k.Follow, k.Help, k.Quit}
 }
 func (k normalKeys) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Search, k.Next, k.Prev},
-		{k.Follow, k.Top, k.Bottom},
+		{k.Filter, k.Follow, k.Top, k.Bottom},
 		{k.Wrap, k.Save, k.Help, k.Quit},
 	}
 }
@@ -119,12 +121,15 @@ type model struct {
 	currentMatch int
 	follow       bool
 	wrap         bool
+	filter       bool // when true + query set, render only matching lines
 	rowOffsets   []int // viewport row index of each logical line's first wrapped row
 	ready        bool
 	dirty        bool // ingest accumulated, waiting for next tick to render
 	cmd          string // command string when mnil is running a child process
 	width        int
 	height       int
+	toast        string    // ephemeral overlay text (empty == no toast)
+	toastExpiry  time.Time // when the toast should disappear (checked in tickMsg)
 }
 
 var (
@@ -136,33 +141,16 @@ var (
 	colSuccess = lipgloss.Color("2")  // green
 	colChipBG  = lipgloss.Color("8")  // bright black (dark gray)
 	colMuted   = lipgloss.Color("8")  // bright black
-	colOnChip  = lipgloss.Color("0")  // black, for text on a colored chip
-
-	brandChip = lipgloss.NewStyle().
-			Background(colBrand).
-			Foreground(colOnChip).
-			Bold(true).
-			Padding(0, 1)
 
 	infoChip = lipgloss.NewStyle().
 			Background(colChipBG).
 			Padding(0, 1)
 
-	matchChip = lipgloss.NewStyle().
-			Background(colAccent).
-			Foreground(colOnChip).
-			Bold(true).
-			Padding(0, 1)
-
-	followChip = lipgloss.NewStyle().
-			Background(colSuccess).
-			Foreground(colOnChip).
-			Bold(true).
-			Padding(0, 1)
-
 	// Bordered sections.
+	// Bottom border only: side rules would be captured by the terminal's
+	// native click-drag selection alongside log text.
 	viewportBox = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
+			Border(lipgloss.RoundedBorder(), false, false, true, false).
 			BorderForeground(colMuted)
 
 	inputBox = lipgloss.NewStyle().
@@ -179,7 +167,19 @@ var (
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colMuted).
 		Padding(0, 1)
+
+	helpPopup = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colBrand).
+			Padding(1, 3)
+
+	toastBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colSuccess).
+			Padding(0, 2)
 )
+
+const toastDuration = 2500 * time.Millisecond
 
 // Background-only SGR codes. Using only bg/bg-reset means foreground colors
 // emitted by the source process survive across the highlighted span.
@@ -237,9 +237,15 @@ func initialModel(cmd string) model {
 	ti.Placeholder = "search..."
 	ti.Prompt = "  "
 	ti.CharLimit = 256
-	ti.PromptStyle = lipgloss.NewStyle().Foreground(colBrand).Bold(true)
-	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(colMuted).Italic(true)
-	ti.Cursor.Style = lipgloss.NewStyle().Foreground(colAccent)
+	tiStyles := ti.Styles()
+	promptStyle := lipgloss.NewStyle().Foreground(colBrand).Bold(true)
+	placeholderStyle := lipgloss.NewStyle().Foreground(colMuted).Italic(true)
+	tiStyles.Focused.Prompt = promptStyle
+	tiStyles.Focused.Placeholder = placeholderStyle
+	tiStyles.Blurred.Prompt = promptStyle
+	tiStyles.Blurred.Placeholder = placeholderStyle
+	tiStyles.Cursor.Color = colAccent
+	ti.SetStyles(tiStyles)
 
 	h := help.New()
 	h.Styles.ShortKey = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
@@ -312,12 +318,34 @@ func (m *model) renderLines() string {
 	if m.currentMatch >= 0 && m.currentMatch < len(m.matches) {
 		currentLine = m.matches[m.currentMatch]
 	}
+
+	// In filter mode, only matching lines are emitted. Non-matching lines
+	// share the next-visible row in rowOffsets so any code that maps a line
+	// index to a viewport row still resolves to something on-screen.
+	// `filter` is only active when there's a query to filter against;
+	// otherwise toggling F with no query would blank the buffer.
+	filterActive := m.filter && m.query != ""
+	matchSet := map[int]struct{}{}
+	if filterActive {
+		for _, idx := range m.matches {
+			matchSet[idx] = struct{}{}
+		}
+	}
+
+	first := true
 	for i, l := range m.lines {
+		if filterActive {
+			if _, ok := matchSet[i]; !ok {
+				m.rowOffsets = append(m.rowOffsets, row)
+				continue
+			}
+		}
 		m.rowOffsets = append(m.rowOffsets, row)
 		text := highlightLine(l.display, l.plain, m.query, i == currentLine)
-		if i > 0 {
+		if !first {
 			b.WriteByte('\n')
 		}
+		first = false
 		b.WriteString(text)
 		row += strings.Count(text, "\n") + 1
 	}
@@ -526,7 +554,7 @@ func (m *model) scrollToCurrentMatch() {
 	if line < len(m.rowOffsets) {
 		row = m.rowOffsets[line]
 	}
-	h := m.viewport.Height
+	h := m.viewport.Height()
 	target := row - h/3
 	if target < 0 {
 		target = 0
@@ -537,8 +565,8 @@ func (m *model) scrollToCurrentMatch() {
 // computeDisplay populates l.display from l.raw under current wrap settings.
 // When wrap is off, display aliases raw (free — Go strings are immutable).
 func (m *model) computeDisplay(l *logLine) {
-	if m.wrap && m.viewport.Width > 0 {
-		l.display = ansi.Hardwrap(l.raw, m.viewport.Width, true)
+	if m.wrap && m.viewport.Width() > 0 {
+		l.display = ansi.Hardwrap(l.raw, m.viewport.Width(), true)
 	} else {
 		l.display = l.raw
 	}
@@ -560,6 +588,12 @@ func (m *model) renderNow() {
 	}
 	m.viewport.SetContent(m.renderLines())
 	m.dirty = false
+}
+
+// showToast sets the ephemeral overlay text. tickMsg clears it after expiry.
+func (m *model) showToast(text string) {
+	m.toast = text
+	m.toastExpiry = time.Now().Add(toastDuration)
 }
 
 // appendNotice adds an mnil-generated status line to the buffer and updates
@@ -624,7 +658,7 @@ func (m *model) trimIfNeeded() {
 	// In wrap mode this approximates (drop is in logical lines, YOffset is
 	// in viewport rows), but the next render fixes the visible content.
 	if !m.follow && m.ready {
-		newOffset := m.viewport.YOffset - drop
+		newOffset := m.viewport.YOffset() - drop
 		if newOffset < 0 {
 			newOffset = 0
 		}
@@ -638,7 +672,7 @@ func (m *model) saveBuffer() {
 	name := fmt.Sprintf("mnil-%s.log", time.Now().Format("2006-01-02-150405"))
 	f, err := os.Create(name)
 	if err != nil {
-		m.appendNotice(fmt.Sprintf("[mnil] save failed: %v", err))
+		m.showToast(fmt.Sprintf("save failed: %v", err))
 		return
 	}
 	defer f.Close()
@@ -649,10 +683,10 @@ func (m *model) saveBuffer() {
 		w.WriteByte('\n')
 	}
 	if err := w.Flush(); err != nil {
-		m.appendNotice(fmt.Sprintf("[mnil] save failed: %v", err))
+		m.showToast(fmt.Sprintf("save failed: %v", err))
 		return
 	}
-	m.appendNotice(fmt.Sprintf("[mnil] saved %d lines to %s", count, name))
+	m.showToast(fmt.Sprintf("saved %d lines → %s", count, name))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -664,13 +698,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		oldVpW := 0
 		if m.ready {
-			oldVpW = m.viewport.Width
+			oldVpW = m.viewport.Width()
 		} else {
-			m.viewport = viewport.New(1, 1)
+			m.viewport = viewport.New(viewport.WithWidth(1), viewport.WithHeight(1))
 			m.ready = true
 		}
 		m.relayout()
-		if m.wrap && m.viewport.Width != oldVpW {
+		if m.wrap && m.viewport.Width() != oldVpW {
 			m.rebuildAllDisplays()
 		}
 		m.renderNow()
@@ -684,6 +718,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.follow {
 				m.viewport.GotoBottom()
 			}
+		}
+		if m.toast != "" && time.Now().After(m.toastExpiry) {
+			m.toast = ""
 		}
 		return m, scheduleTick()
 
@@ -714,6 +751,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendNotice(note)
 
 	case tea.KeyMsg:
+		// Esc/backspace dismiss the help popup before any other handling so
+		// they don't fall through to clearing the search query.
+		if m.help.ShowAll {
+			switch msg.String() {
+			case "esc", "backspace", "?":
+				m.help.ShowAll = false
+				return m, nil
+			}
+		}
 		if m.mode == modeSearch {
 			switch {
 			case key.Matches(msg, m.keys.Close):
@@ -727,6 +773,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.query = ""
 				m.matches = nil
 				m.currentMatch = -1
+				m.relayout()
 				m.renderNow()
 				return m, nil
 			case key.Matches(msg, m.keys.Next):
@@ -746,7 +793,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.search, cmd = m.search.Update(msg)
 			if m.search.Value() != prev {
+				prevEmpty := m.query == ""
 				m.query = m.search.Value()
+				if prevEmpty != (m.query == "") {
+					m.relayout()
+				}
 				m.recomputeMatches()
 				if m.query != "" {
 					m.follow = false
@@ -785,8 +836,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.GotoBottom()
 			}
 			return m, nil
+		case key.Matches(msg, m.keys.Filter):
+			m.filter = !m.filter
+			m.renderNow()
+			m.scrollToCurrentMatch()
+			return m, nil
 		case key.Matches(msg, m.keys.Wrap):
 			m.wrap = !m.wrap
+			m.relayout()
 			m.rebuildAllDisplays()
 			wasFollowing := m.follow
 			m.renderNow()
@@ -811,6 +868,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.query = ""
 				m.matches = nil
 				m.currentMatch = -1
+				m.relayout()
 				m.renderNow()
 			}
 			return m, nil
@@ -819,11 +877,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.ready {
 		var cmd tea.Cmd
-		prevOffset := m.viewport.YOffset
+		prevOffset := m.viewport.YOffset()
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
 		// If the user scrolled up manually, disable follow.
-		if m.viewport.YOffset != prevOffset && m.viewport.YOffset < m.viewport.TotalLineCount()-m.viewport.Height {
+		if m.viewport.YOffset() != prevOffset && m.viewport.YOffset() < m.viewport.TotalLineCount()-m.viewport.Height() {
 			m.follow = false
 		}
 	}
@@ -838,25 +896,24 @@ func (m *model) relayout() {
 		return
 	}
 
-	inputOuterW := m.width / 2
-	helpOuterW := m.width - inputOuterW
+	helpOuterW := m.width / 2
 
-	// Help content width drives word-wrap in full mode.
-	helpInnerW := helpOuterW - 4 // 2 borders + 2 padding
-	if helpInnerW < 10 {
-		helpInnerW = 10
-	}
-	m.help.Width = helpInnerW
+	// Used by the bubbles help component (search-mode help only).
+	m.help.SetWidth(helpOuterW - 4)
 
-	// Measure the help view (1 line in short mode, multi-line in full mode).
-	helpInnerH := lipgloss.Height(m.help.View(m.activeKeyMap()))
+	// Bottom bar always shows short help; full help lives in the popup.
+	helpInnerH := lipgloss.Height(m.renderShortHelp())
 	if helpInnerH < 1 {
 		helpInnerH = 1
 	}
 	bottomH := helpInnerH + 2 // top + bottom border
 
-	const titleH, vpBorders = 1, 2
-	vpW := m.width - 2
+	titleH := 0
+	if m.hasTitle() {
+		titleH = 1
+	}
+	const vpBorders = 1 // bottom border only
+	vpW := m.width
 	vpH := m.height - titleH - vpBorders - bottomH
 	if vpW < 1 {
 		vpW = 1
@@ -864,39 +921,175 @@ func (m *model) relayout() {
 	if vpH < 1 {
 		vpH = 1
 	}
-	m.viewport.Width = vpW
-	m.viewport.Height = vpH
+	m.viewport.SetWidth(vpW)
+	m.viewport.SetHeight(vpH)
 
+	// Reserve enough for "9999999 lines" + chip chrome so the search width
+	// stays stable across log growth.
+	linesOuterW := len("9999999 lines") + 4
+	matchesOuterW := 0
+	if m.query != "" {
+		// Upper bound covering "999999/999999" and "no matches".
+		matchesOuterW = len("999999/999999") + 4
+	}
+	inputOuterW := m.width - helpOuterW - linesOuterW - matchesOuterW
 	inputInnerW := inputOuterW - 4
 	if inputInnerW < 10 {
 		inputInnerW = 10
 	}
-	m.search.Width = inputInnerW - 2
+	m.search.SetWidth(inputInnerW - 2)
 }
 
-func (m model) View() string {
+func (m model) View() tea.View {
 	if !m.ready {
-		return "loading..."
+		v := tea.NewView("loading...")
+		v.AltScreen = true
+		return v
 	}
 
-	title := m.titleBar()
-	viewportView := viewportBox.Render(m.viewport.View())
+	vpInner := m.viewport.View()
+	vpW, vpH := m.viewport.Width(), m.viewport.Height()
+	var overlays []*lipgloss.Layer
+	if m.help.ShowAll {
+		popup := helpPopup.Render(m.renderFullHelp())
+		px := (vpW - lipgloss.Width(popup)) / 2
+		py := (vpH - lipgloss.Height(popup)) / 2
+		overlays = append(overlays, lipgloss.NewLayer(popup).X(px).Y(py).Z(1))
+	}
+	if m.toast != "" {
+		t := toastBox.Render(m.toast)
+		tx := vpW - lipgloss.Width(t) - 1
+		if tx < 0 {
+			tx = 0
+		}
+		overlays = append(overlays, lipgloss.NewLayer(t).X(tx).Y(0).Z(2))
+	}
+	if len(overlays) > 0 {
+		// Pad the bg to full viewport dims so the compositor canvas covers
+		// the whole region (viewport.View lines aren't right-padded, which
+		// would otherwise truncate the composed output to the longest line).
+		bgPadded := lipgloss.Place(vpW, vpH, lipgloss.Left, lipgloss.Top, vpInner)
+		layers := append([]*lipgloss.Layer{lipgloss.NewLayer(bgPadded)}, overlays...)
+		vpInner = lipgloss.NewCompositor(layers...).Render()
+	}
+	// Pin the box width to vpW so the bottom rule spans the full viewport
+	// regardless of how wide the inner content's longest line happens to be.
+	viewportView := viewportBox.Width(vpW).Render(vpInner)
 
-	inputOuterW := m.width / 2
-	helpOuterW := m.width - inputOuterW
-
-	helpContent := m.help.View(m.activeKeyMap())
+	helpContent := m.renderShortHelp()
 	contentH := lipgloss.Height(helpContent)
 
 	style := inputBox
 	if m.mode == modeSearch {
 		style = inputBoxFocused
 	}
+
+	linesBox := inputBox.Height(contentH).Render(fmt.Sprintf("%d lines", len(m.lines)))
+	linesW := lipgloss.Width(linesBox)
+
+	var matchesBox string
+	var matchesW int
+	if m.query != "" {
+		matchesBox = inputBox.Height(contentH).Render(m.matchesText())
+		matchesW = lipgloss.Width(matchesBox)
+	}
+
+	helpOuterW := m.width / 2
+	inputOuterW := m.width - helpOuterW - linesW - matchesW
+
 	inputView := style.Width(inputOuterW - 2).Height(contentH).Render(m.search.View())
 	helpView := helpBox.Width(helpOuterW - 2).Render(helpContent)
-	bottom := lipgloss.JoinHorizontal(lipgloss.Top, inputView, helpView)
 
-	return title + "\n" + viewportView + "\n" + bottom
+	row := []string{linesBox, inputView}
+	if matchesBox != "" {
+		row = append(row, matchesBox)
+	}
+	row = append(row, helpView)
+	bottom := lipgloss.JoinHorizontal(lipgloss.Top, row...)
+
+	out := viewportView + "\n" + bottom
+	if m.hasTitle() {
+		out += "\n" + m.titleBar()
+	}
+	v := tea.NewView(out)
+	v.AltScreen = true
+	return v
+}
+
+func (m model) hasTitle() bool {
+	return m.cmd != "" || m.wrap
+}
+
+func (m model) matchesText() string {
+	if len(m.matches) == 0 {
+		return "no matches"
+	}
+	return fmt.Sprintf("%d/%d", m.currentMatch+1, len(m.matches))
+}
+
+// helpStyles returns the per-binding key/desc styles, with Follow flipped to
+// green when follow is active.
+func (m model) helpStyleFor() func(string) (lipgloss.Style, lipgloss.Style) {
+	keyStyle := lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+	keyOnStyle := lipgloss.NewStyle().Foreground(colSuccess).Bold(true)
+	descStyle := lipgloss.NewStyle().Foreground(colMuted)
+	descOnStyle := lipgloss.NewStyle().Foreground(colSuccess)
+	return func(k string) (lipgloss.Style, lipgloss.Style) {
+		if (k == "F" && m.follow) || (k == "f" && m.filter) {
+			return keyOnStyle, descOnStyle
+		}
+		return keyStyle, descStyle
+	}
+}
+
+// renderShortHelp builds the inline short-help bar shown at the bottom.
+func (m model) renderShortHelp() string {
+	if m.mode == modeSearch {
+		return m.help.ShortHelpView(searchKeys(m.keys).ShortHelp())
+	}
+	styleFor := m.helpStyleFor()
+	sep := lipgloss.NewStyle().Foreground(colMuted).Render(" · ")
+	parts := []string{}
+	for _, b := range normalKeys(m.keys).ShortHelp() {
+		h := b.Help()
+		ks, ds := styleFor(h.Key)
+		parts = append(parts, ks.Render(h.Key)+" "+ds.Render(h.Desc))
+	}
+	return strings.Join(parts, sep)
+}
+
+// renderFullHelp builds the multi-column full-help grid used inside the popup.
+func (m model) renderFullHelp() string {
+	if m.mode == modeSearch {
+		return m.help.FullHelpView(searchKeys(m.keys).FullHelp())
+	}
+	styleFor := m.helpStyleFor()
+	groups := normalKeys(m.keys).FullHelp()
+	cols := make([]string, len(groups))
+	for ci, group := range groups {
+		maxKey := 0
+		for _, b := range group {
+			if w := lipgloss.Width(b.Help().Key); w > maxKey {
+				maxKey = w
+			}
+		}
+		rows := make([]string, len(group))
+		for ri, b := range group {
+			h := b.Help()
+			ks, ds := styleFor(h.Key)
+			pad := strings.Repeat(" ", maxKey-lipgloss.Width(h.Key))
+			rows[ri] = ks.Render(h.Key) + pad + "  " + ds.Render(h.Desc)
+		}
+		cols[ci] = strings.Join(rows, "\n")
+	}
+	blocks := make([]string, 0, 2*len(cols)-1)
+	for i, c := range cols {
+		if i > 0 {
+			blocks = append(blocks, "   ")
+		}
+		blocks = append(blocks, c)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, blocks...)
 }
 
 func truncate(s string, max int) string {
@@ -910,7 +1103,7 @@ func truncate(s string, max int) string {
 }
 
 func (m model) titleBar() string {
-	left := brandChip.Render("mnil")
+	var left string
 	if m.cmd != "" {
 		maxCmd := m.width / 3
 		if maxCmd > 60 {
@@ -921,21 +1114,9 @@ func (m model) titleBar() string {
 		}
 		left += infoChip.Render(truncate(m.cmd, maxCmd))
 	}
-	left += infoChip.Render(fmt.Sprintf("%d lines", len(m.lines)))
-	if m.query != "" {
-		if len(m.matches) == 0 {
-			left += matchChip.Render(fmt.Sprintf("/%s · no matches", m.query))
-		} else {
-			left += matchChip.Render(fmt.Sprintf("/%s · %d/%d", m.query, m.currentMatch+1, len(m.matches)))
-		}
-	}
-
 	var right string
 	if m.wrap {
 		right += infoChip.Render("WRAP")
-	}
-	if m.follow {
-		right += followChip.Render("● FOLLOW")
 	}
 
 	pad := m.width - lipgloss.Width(left) - lipgloss.Width(right)
@@ -971,7 +1152,8 @@ Keys (in-app):
   /            open search (live: matches highlight as you type)
   tab / S+tab  next / previous match
   esc          clear search
-  f            toggle follow (auto-scroll to new lines)
+  f            toggle filter (show only matching lines, requires a query)
+  F            toggle follow (auto-scroll to new lines)
   g / G        jump to top / bottom
   w            toggle line wrap
   s            save buffer to a timestamped .log file in CWD
@@ -1007,10 +1189,8 @@ func main() {
 	}
 	opts := []tea.ProgramOption{
 		tea.WithInput(tty),
-		tea.WithAltScreen(),
-		// No mouse capture: lets the terminal handle native click-drag
-		// selection of log text. Scroll/nav uses the keyboard (arrows,
-		// pgup/pgdn, g/G).
+		// AltScreen is set on the View struct returned from View(). No mouse
+		// capture so the terminal handles native click-drag text selection.
 	}
 
 	var (
