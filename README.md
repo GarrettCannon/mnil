@@ -36,7 +36,7 @@ brew install mnil
 
 ### From source
 
-Requires Go 1.21 or newer.
+Requires Go 1.26 or newer.
 
 ```sh
 go install github.com/garrettcannon/mnil@latest
@@ -93,6 +93,10 @@ Mouse wheel scrolls the viewport (and disables follow).
 - **Color hinting** — in `mnil "<cmd>"` mode mnil sets `FORCE_COLOR=1`,
   `CLICOLOR_FORCE=1`, and `PYTHONUNBUFFERED=1` in the child's environment so
   most tools voluntarily keep color and flush per line.
+- **Exit code passthrough** — in `mnil "<cmd>"` mode, if the child exits with
+  a failure, mnil exits with the same code after you quit.
+- **End-of-stream notices** — `[mnil] process exited` / `[mnil] input closed`
+  lines mark when the source finished, so a quiet stream isn't ambiguous.
 
 In pipe mode, you may still need to coax color out of tools that detect
 non-TTY stdout:
