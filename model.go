@@ -523,11 +523,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case key.Matches(msg, m.keys.Prev):
 				m.stepMatch(-1)
 				return m, nil
-			case key.Matches(msg, m.keys.Help):
-				m.help.ShowAll = !m.help.ShowAll
-				m.relayout()
-				return m, nil
 			}
+			// Note: Help (?) is intentionally not handled here so it can be
+			// typed into the search query; the binding is dropped from the
+			// search-mode help below.
 
 			prev := m.search.Value()
 			var cmd tea.Cmd

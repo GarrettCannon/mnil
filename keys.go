@@ -40,7 +40,10 @@ func newKeyMap() keyMap {
 type normalKeys keyMap
 
 func (k normalKeys) ShortHelp() []key.Binding {
-	return []key.Binding{k.Search, k.Next, k.Filter, k.Follow, k.Help, k.Quit}
+	return []key.Binding{
+		k.Search, k.Next, k.Prev, k.Filter, k.Follow,
+		k.Top, k.Bottom, k.Wrap, k.Save, k.Help, k.Quit,
+	}
 }
 func (k normalKeys) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
@@ -53,11 +56,11 @@ func (k normalKeys) FullHelp() [][]key.Binding {
 type searchKeys keyMap
 
 func (k searchKeys) ShortHelp() []key.Binding {
-	return []key.Binding{k.Next, k.Prev, k.Clear, k.Close, k.Help}
+	return []key.Binding{k.Next, k.Prev, k.Clear, k.Close}
 }
 func (k searchKeys) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Next, k.Prev},
-		{k.Clear, k.Close, k.Help},
+		{k.Clear, k.Close},
 	}
 }

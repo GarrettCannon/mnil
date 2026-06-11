@@ -6,7 +6,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 )
 
 var (
@@ -16,12 +15,11 @@ var (
 	colBrand   = lipgloss.Color("5")  // magenta (purple-ish in most themes)
 	colAccent  = lipgloss.Color("13") // bright magenta
 	colSuccess = lipgloss.Color("2")  // green
-	colChipBG  = lipgloss.Color("8")  // bright black (dark gray)
 	colMuted   = lipgloss.Color("8")  // bright black
 
-	infoChip = lipgloss.NewStyle().
-			Background(colChipBG).
-			Padding(0, 1)
+	paddingWidth  = 1
+	paddingHeight = 0
+	infoBoxWidth  = 16
 
 	// Bordered sections.
 	// Bottom border only: side rules would be captured by the terminal's
@@ -30,58 +28,16 @@ var (
 			Border(lipgloss.RoundedBorder(), false, false, true, false).
 			BorderForeground(colMuted)
 
-	inputBox = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colMuted).
-			Padding(0, 1)
-
-	inputBoxFocused = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colBrand).
-			Padding(0, 1)
-
-	helpBox = lipgloss.NewStyle().
+	box = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colMuted).
-		Padding(0, 1)
+		Padding(paddingHeight, paddingWidth)
 
-	helpPopup = lipgloss.NewStyle().
+	boxFocused = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colBrand).
-			Padding(1, 3)
-
-	toastBox = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colSuccess).
-			Padding(0, 2)
+			Padding(paddingHeight, paddingWidth)
 )
-
-// barLayout holds the outer (border-inclusive) widths of the bottom-bar
-// boxes. It is the single source of truth for bottom-bar geometry, shared by
-// relayout (which sizes the textinput) and View (which renders the boxes).
-type barLayout struct {
-	lines, input, matches, help int
-}
-
-// barLayout sizes the bottom bar from the window width. Chip widths are
-// fixed upper bounds (max line count, max match counter) so the input box
-// doesn't resize as counts grow.
-func (m model) barLayout() barLayout {
-	var bl barLayout
-	bl.help = m.width / 2
-	bl.lines = len(fmt.Sprintf("%d lines", maxLines)) + 4
-	if m.query != "" {
-		bl.matches = len(fmt.Sprintf("%d/%d", maxLines, maxLines)) + 4 // covers "no matches" too
-	}
-	bl.input = m.width - bl.help - bl.lines - bl.matches
-	// Border (2) + padding (2) + prompt (2) + a few visible chars. On very
-	// narrow windows the bar may overflow and wrap, but no width goes negative.
-	const minInput = 14
-	if bl.input < minInput {
-		bl.input = minInput
-	}
-	return bl
-}
 
 // relayout recomputes child component sizes from the current window dims and
 // help-expanded state. Called from WindowSizeMsg and when ? is toggled.
@@ -90,25 +46,22 @@ func (m *model) relayout() {
 		return
 	}
 
-	bl := m.barLayout()
+	// Search-mode short help is truncated by the bubbles help component to its
+	// width; size it to the help box's content area (full width minus padding).
+	m.help.SetWidth(m.width - 2*paddingWidth)
 
-	// Used by the bubbles help component (search-mode help only).
-	m.help.SetWidth(bl.help - 4)
-
-	// Bottom bar always shows short help; full help lives in the popup.
-	helpInnerH := lipgloss.Height(m.renderShortHelp())
-	if helpInnerH < 1 {
-		helpInnerH = 1
+	// The bottom bar is a help line stacked over the input row, both sized from
+	// the rendered short-help height. Derive bottomH the same way so the space
+	// reserved here stays in sync with what View actually renders.
+	contentH := lipgloss.Height(m.renderShortHelp())
+	if contentH < 1 {
+		contentH = 1
 	}
-	bottomH := helpInnerH + 2 // top + bottom border
+	bottomH := contentH*2 + 2 // help line + input row (content + top/bottom border)
 
-	titleH := 0
-	if m.hasTitle() {
-		titleH = 1
-	}
 	const vpBorders = 1 // bottom border only
 	vpW := m.width
-	vpH := m.height - titleH - vpBorders - bottomH
+	vpH := m.height - vpBorders - bottomH
 	if vpW < 1 {
 		vpW = 1
 	}
@@ -118,7 +71,14 @@ func (m *model) relayout() {
 	m.viewport.SetWidth(vpW)
 	m.viewport.SetHeight(vpH)
 
-	m.search.SetWidth(bl.input - 6) // border (2) + padding (2) + prompt (2)
+	// Match View's inputBoxWidth, less the box frame: border (2) + padding (2) +
+	// prompt (2). Narrow windows clamp to a minimum rather than going negative.
+	inputBoxWidth := m.width - (infoBoxWidth * 2)
+	searchWidth := inputBoxWidth - 6
+	if searchWidth < 1 {
+		searchWidth = 1
+	}
+	m.search.SetWidth(searchWidth)
 }
 
 func (m model) View() tea.View {
@@ -132,13 +92,13 @@ func (m model) View() tea.View {
 	vpW, vpH := m.viewport.Width(), m.viewport.Height()
 	var overlays []*lipgloss.Layer
 	if m.help.ShowAll {
-		popup := helpPopup.Render(m.renderFullHelp())
+		popup := boxFocused.Padding(1, 3).Render(m.renderFullHelp())
 		px := (vpW - lipgloss.Width(popup)) / 2
 		py := (vpH - lipgloss.Height(popup)) / 2
 		overlays = append(overlays, lipgloss.NewLayer(popup).X(px).Y(py).Z(1))
 	}
 	if m.toast != "" {
-		t := toastBox.Render(m.toast)
+		t := box.BorderForeground(colSuccess).Padding(0, 2).Render(m.toast)
 		tx := vpW - lipgloss.Width(t) - 1
 		if tx < 0 {
 			tx = 0
@@ -160,33 +120,26 @@ func (m model) View() tea.View {
 	helpContent := m.renderShortHelp()
 	contentH := lipgloss.Height(helpContent)
 
-	style := inputBox
+	inputStyle := box
 	if m.mode == modeSearch {
-		style = inputBoxFocused
+		inputStyle = boxFocused
 	}
 
-	bl := m.barLayout()
-	linesBox := inputBox.Width(bl.lines - 2).Height(contentH).Render(fmt.Sprintf("%d lines", len(m.lines)))
-	inputView := style.Width(bl.input - 2).Height(contentH).Render(m.search.View())
+	inputBoxWidth := m.width - (infoBoxWidth * 2)
 
-	row := []string{linesBox, inputView}
-	if m.query != "" {
-		row = append(row, inputBox.Width(bl.matches-2).Height(contentH).Render(m.matchesText()))
-	}
-	row = append(row, helpBox.Width(bl.help-2).Render(helpContent))
-	bottom := lipgloss.JoinHorizontal(lipgloss.Top, row...)
+	inputBox := inputStyle.Width(inputBoxWidth).Height(contentH).Render(m.search.View())
+	linesBox := box.Width(infoBoxWidth).Height(contentH).Align(lipgloss.Right).Render(fmt.Sprintf("%d lines", len(m.lines)))
+	matchesBox := box.Width(infoBoxWidth).Height(contentH).Align(lipgloss.Right).Render(m.matchesText())
+
+	inputRow := lipgloss.JoinHorizontal(lipgloss.Top, linesBox, inputBox, matchesBox)
+	helpBox := lipgloss.NewStyle().Padding(0, 1).Width(m.width).Align(lipgloss.Right).Render(helpContent)
+	bottom := lipgloss.JoinVertical(lipgloss.Left, helpBox, inputRow)
 
 	out := viewportView + "\n" + bottom
-	if m.hasTitle() {
-		out += "\n" + m.titleBar()
-	}
+
 	v := tea.NewView(out)
 	v.AltScreen = true
 	return v
-}
-
-func (m model) hasTitle() bool {
-	return m.cmd != "" || m.wrap
 }
 
 func (m model) matchesText() string {
@@ -211,19 +164,52 @@ func (m model) helpStyleFor() func(string) (lipgloss.Style, lipgloss.Style) {
 	}
 }
 
-// renderShortHelp builds the inline short-help bar shown at the bottom.
+// renderShortHelp builds the inline short-help bar shown at the bottom. It
+// degrades gracefully on narrow windows: the help and quit bindings always
+// stay visible (help is the gateway to the full key list), and the middle
+// bindings are dropped from the tail until the line fits on one row.
 func (m model) renderShortHelp() string {
 	if m.mode == modeSearch {
 		return m.help.ShortHelpView(searchKeys(m.keys).ShortHelp())
 	}
 	styleFor := m.helpStyleFor()
 	sep := lipgloss.NewStyle().Foreground(colMuted).Render(" · ")
+	sepW := lipgloss.Width(sep)
+
+	item := func(key, desc string) string {
+		ks, ds := styleFor(key)
+		return ks.Render(key) + " " + ds.Render(desc)
+	}
+
+	// Reserve room for the always-visible tail (help · quit) so they survive
+	// even when the middle bindings don't fit.
+	helpH, quitH := m.keys.Help.Help(), m.keys.Quit.Help()
+	tail := []string{item(helpH.Key, helpH.Desc), item(quitH.Key, quitH.Desc)}
+	reserve := 0
+	for _, t := range tail {
+		reserve += lipgloss.Width(t) + sepW
+	}
+
+	budget := m.width - 2*paddingWidth // help box has 1 cell of padding each side
 	parts := []string{}
+	width := 0
 	for _, b := range normalKeys(m.keys).ShortHelp() {
 		h := b.Help()
-		ks, ds := styleFor(h.Key)
-		parts = append(parts, ks.Render(h.Key)+" "+ds.Render(h.Desc))
+		if h.Key == helpH.Key || h.Key == quitH.Key {
+			continue // rendered in the reserved tail
+		}
+		it := item(h.Key, h.Desc)
+		next := lipgloss.Width(it)
+		if len(parts) > 0 {
+			next += sepW
+		}
+		if width+next+reserve > budget {
+			break
+		}
+		parts = append(parts, it)
+		width += next
 	}
+	parts = append(parts, tail...)
 	return strings.Join(parts, sep)
 }
 
@@ -259,28 +245,4 @@ func (m model) renderFullHelp() string {
 		blocks = append(blocks, c)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, blocks...)
-}
-
-func (m model) titleBar() string {
-	var left string
-	if m.cmd != "" {
-		maxCmd := m.width / 3
-		if maxCmd > 60 {
-			maxCmd = 60
-		}
-		if maxCmd < 12 {
-			maxCmd = 12
-		}
-		left += infoChip.Render(ansi.Truncate(m.cmd, maxCmd, "…"))
-	}
-	var right string
-	if m.wrap {
-		right += infoChip.Render("WRAP")
-	}
-
-	pad := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if pad < 0 {
-		pad = 0
-	}
-	return left + strings.Repeat(" ", pad) + right
 }
